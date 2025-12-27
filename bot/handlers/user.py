@@ -5,6 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot.loader import bot, db
 from bot.config import Config
 from bot.services.time_convert import convert_time
+from bot.services.layout_fix import looks_like_wrong_layout, en_to_ru_layout
 
 router = Router()
 
@@ -19,18 +20,31 @@ def get_auth_keyboard(user_id: int):
     return builder.as_markup()
 
 
+# 📎 Автор пересланного сообщения
+def get_forward_author(msg: Message) -> str | None:
+    if msg.forward_from:
+        return msg.forward_from.full_name
+    if msg.forward_sender_name:
+        return msg.forward_sender_name
+    return None
+
+
 # 📌 Обработка сообщений от пользователей
 @router.message()
 async def handle_user(msg: Message):
     user_id = msg.from_user.id
+    text = msg.text
 
-    # Проверка авторизации
+    if not text:
+        return
+
+    text = text.strip()
+
+    # 🔐 Проверка авторизации
     is_authorized = await db.is_user_authorized(user_id)
 
     if not is_authorized:
         await msg.answer("⛔ Вы не авторизованы. Ожидайте подтверждения от администратора.")
-
-        # Сообщение админу
         await bot.send_message(
             Config.ADMIN_ID,
             f"❗ Новый пользователь:\n"
@@ -39,9 +53,38 @@ async def handle_user(msg: Message):
         )
         return
 
-    # Если авторизован — обрабатываем сообщение
-    result = convert_time(msg.text.strip())
+    # ⌨️ FIX: неправильная раскладка (ТОЛЬКО для пересланных)
+    if msg.forward_from or msg.forward_sender_name:
+        if looks_like_wrong_layout(text):
+            fixed_text = en_to_ru_layout(text)
+
+            if fixed_text != text:
+                author = get_forward_author(msg)
+
+                if author:
+                    reply_text = (
+                        f"⌨️ Кажется, {author} писал:\n\n"
+                        f"{fixed_text}"
+                    )
+                else:
+                    reply_text = (
+                        "⌨️ Похоже, сообщение набрано не в той раскладке:\n\n"
+                        f"{fixed_text}"
+                    )
+
+                await msg.answer(reply_text)
+                return
+
+        # ⛔ Переслано, но это не раскладка и не время
+        await msg.answer(
+            "Я не понял запрос. Напиши время в формате HH или HH:MM."
+        )
+        return
+
+    # ⏰ Основная логика (таймзоны) — обычные сообщения
+    result = convert_time(text)
     await msg.answer(result)
+
 
 
 # 📌 Админ: авторизовать пользователя
@@ -55,7 +98,10 @@ async def approve_user(callback: CallbackQuery):
     await db.authorize_user(user_id)
 
     await callback.message.edit_text(f"✅ Пользователь {user_id} авторизован.")
-    await bot.send_message(user_id, "✅ Вы были авторизованы. Теперь можете пользоваться ботом!")
+    await bot.send_message(
+        user_id,
+        "✅ Вы были авторизованы. Теперь можете пользоваться ботом!"
+    )
 
 
 # 📌 Админ: отказать пользователю
@@ -68,4 +114,7 @@ async def deny_user(callback: CallbackQuery):
     user_id = int(callback.data.split(":")[1])
 
     await callback.message.edit_text(f"❌ Пользователю {user_id} отказано.")
-    await bot.send_message(user_id, "🚫 Вам отказано в доступе к боту.")
+    await bot.send_message(
+        user_id,
+        "🚫 Вам отказано в доступе к боту."
+    )
